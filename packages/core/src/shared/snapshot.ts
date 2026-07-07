@@ -116,12 +116,13 @@ export type _TextDecoder = Wrapped<TextDecoder>;
 export const _TextEncoder = makeWrap(globalThis.TextEncoder);
 export type _TextEncoder = Wrapped<TextEncoder>;
 
+
+const wrapMap = new WeakMap<any, any>();
+const wrapMapGet = wrapMap.get.bind(wrapMap);
+const wrapMapSet = wrapMap.set.bind(wrapMap);
+const wrapMapHas = wrapMap.has.bind(wrapMap);
+
 export function makeWrap<T extends object>(source: T): Wrapped<T> {
-	// Constructable builtins like Set/Map/URL need to retain their [[Construct]]
-	// behavior; cloning them into plain objects breaks `new _Set(...)`.
-	if (typeof source === "function") {
-		return new Proxy(source, {}) as Wrapped<T>;
-	}
 
 	function getAllPropertyDescriptors(obj: object) {
 		const descriptors: PropertyDescriptorMap = {};
@@ -131,6 +132,19 @@ export function makeWrap<T extends object>(source: T): Wrapped<T> {
 		}
 		for (const sym of Object.getOwnPropertySymbols(obj)) {
 			descriptors[sym as any] = Object.getOwnPropertyDescriptor(obj, sym)!;
+		}
+		for(const sym in descriptors){
+			for(const key of ['value','get','set'] as const)if(key in descriptors[sym]){
+				let old = descriptors[sym][key];
+				if(typeof old === "function")old = function(this: any, ...args: any){
+					if(new.target !== undefined){
+						return Reflect_construct(old,args,new.target);
+					}else{
+						return Reflect_apply(old,wrapMapHas(this) ? wrapMapGet(this) : this,args);
+					}
+				}
+				if(typeof old === "object" || typeof old === "function")descriptors[sym][key] = old = makeWrap(old);
+			}
 		}
 		return descriptors;
 	}
@@ -144,6 +158,23 @@ export function makeWrap<T extends object>(source: T): Wrapped<T> {
 		// Clone current object's own props and set prototype to cloned parent
 		const clone = Object.create(clonedProto, getAllPropertyDescriptors(obj));
 		return clone;
+	}
+
+	// Constructable builtins like Set/Map/URL need to retain their [[Construct]]
+	// behavior; cloning them into plain objects breaks `new _Set(...)`.
+	if (typeof source === "function") {
+		const proto = clonePrototypeChain(Object.getPrototypeOf(source));
+		const f = function(this: any, ...args: any){
+			if(new.target !== undefined) {
+				const wrap = Reflect_construct(source,args,new.target);
+				wrapMapSet(this, wrap);
+			}else{
+				return Reflect_apply(source, this, args)
+			}
+		};
+		Object.setPrototypeOf(f, proto);
+		Object.defineProperties(f, getAllPropertyDescriptors(source));
+		return f as Wrapped<T>;
 	}
 
 	// Actually clone the source itself (including own properties)
